@@ -1241,8 +1241,8 @@ async def seed_data():
             },
             {
                 "role": "teacher", 
-                "login": "shahlo", 
-                "passwordHash": hash_password("913947945"), 
+                "login": "saatbaeva", 
+                "passwordHash": hash_password("shahlo000"), 
                 "name": "Shahlo", 
                 "isActive": True, 
                 "createdAt": datetime.utcnow()
