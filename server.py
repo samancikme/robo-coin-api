@@ -291,21 +291,35 @@ async def get_student(student_id: str, user: dict = Depends(require_teacher)):
         "presentClasses": present
     }
 
+
 # O'quvchini TO'LIQ o'chirish
 @app.delete("/api/teacher/students/{student_id}")
 async def delete_student(student_id: str, user: dict = Depends(require_teacher)):
-    student_oid = to_object_id(student_id)
-    
-    # O'quvchini o'chirish
-    await db.users.delete_one({"_id": student_oid})
-    
-    # O'quvchiga tegishli barcha ma'lumotlarni ham o'chirish
-    await db.coinTransactions.delete_many({"studentId": student_oid})
-    await db.attendance.delete_many({"studentId": student_oid})
-    await db.submissions.delete_many({"studentId": student_oid})
-    await db.messages.delete_many({"$or": [{"fromUserId": student_oid}, {"toUserId": student_oid}]})
-    
-    return {"message": "O'quvchi va uning barcha ma'lumotlari o'chirildi"}
+    try:
+        student_oid = to_object_id(student_id)
+        
+        # Avval o'quvchi borligini tekshirish
+        student = await db.users.find_one({"_id": student_oid})
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        # O'quvchini o'chirish
+        await db.users.delete_one({"_id": student_oid})
+        
+        # Tegishli ma'lumotlarni o'chirish
+        await db.coinTransactions.delete_many({"studentId": student_oid})
+        await db.attendance.delete_many({"studentId": student_oid})
+        await db.submissions.delete_many({"studentId": student_oid})
+        await db.messages.delete_many({
+            "$or": [
+                {"fromUserId": student_oid}, 
+                {"toUserId": student_oid}
+            ]
+        })
+        
+        return {"message": "O'quvchi va uning barcha ma'lumotlari o'chirildi"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================
 # COIN OPERATSIYALARI
@@ -784,29 +798,55 @@ async def seed_data():
 # ============================================
 
 # ============================================
-# PAROLNI YANGILASH (RESET PASSWORD)
+# PAROLNI YANGILASH
 # ============================================
 
 @app.post("/api/teacher/students/{student_id}/reset-password")
 async def reset_student_password(student_id: str, user: dict = Depends(require_teacher)):
-    student = await db.users.find_one({"_id": to_object_id(student_id)})
-    if not student:
-        raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
-    
-    # Yangi parol yaratish
-    new_password = generate_password(8)
-    
-    # Parolni hash qilib saqlash
-    await db.users.update_one(
-        {"_id": to_object_id(student_id)},
-        {"$set": {"passwordHash": hash_password(new_password)}}
-    )
-    
-    return {
-        "message": "Parol yangilandi",
-        "login": student["login"],
-        "newPassword": new_password
-    }
+    try:
+        student_oid = to_object_id(student_id)
+        
+        # O'quvchini topish
+        student = await db.users.find_one({"_id": student_oid})
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        # Yangi parol yaratish
+        new_password = generate_password(8)
+        
+        # Parolni hash qilib saqlash
+        hashed = hash_password(new_password)
+        await db.users.update_one(
+            {"_id": student_oid},
+            {"$set": {"passwordHash": hashed}}
+        )
+        
+        return {
+            "message": "Parol yangilandi",
+            "login": student["login"],
+            "newPassword": new_password
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/teacher/students/{student_id}/password")
+async def get_student_password_info(student_id: str, user: dict = Depends(require_teacher)):
+    """O'quvchi login ma'lumotini olish (parolni faqat reset qilish mumkin)"""
+    try:
+        student_oid = to_object_id(student_id)
+        student = await db.users.find_one({"_id": student_oid})
+        
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        return {
+            "login": student["login"],
+            "name": student["name"],
+            "message": "Parolni ko'rish uchun 'Yangi parol yaratish' tugmasini bosing"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================
 # ROOT ENDPOINT
