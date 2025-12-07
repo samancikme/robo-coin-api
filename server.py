@@ -240,30 +240,45 @@ async def get_students(groupId: Optional[str] = None, user: dict = Depends(requi
 
 @app.post("/api/teacher/students")
 async def create_student(request: Request, user: dict = Depends(require_teacher)):
-    data = await request.json()
+    data = await parse_json(request)
+    
     name = data.get("name")
     groupId = data.get("groupId")
-    login = data.get("login") or name.lower().replace(" ", "_")
+    
+    if not name:
+        raise HTTPException(status_code=400, detail="Ism kerak")
+    if not groupId:
+        raise HTTPException(status_code=400, detail="Guruh kerak")
+    
+    login = data.get("login") or name.lower().replace(" ", "_").replace("'", "")
     
     existing = await db.users.find_one({"login": login})
     if existing:
         raise HTTPException(status_code=400, detail="Bu login allaqachon mavjud")
     
-    password = generate_password()
+    # Tasodifiy parol yaratish
+    password = generate_password(8)
     
     result = await db.users.insert_one({
         "role": "student",
         "login": login,
         "passwordHash": hash_password(password),
+        "plainPassword": password,  # <-- PAROLNI OCHIQ SAQLAYMIZ
         "name": name,
-        "groupId": ObjectId(groupId),
+        "groupId": to_object_id(groupId),
         "avatarIcon": "robot1",
         "totalCoins": 0,
         "isActive": True,
         "createdAt": datetime.utcnow()
     })
     
-    return {"id": str(result.inserted_id), "login": login, "generatedPassword": password, "name": name}
+    return {
+        "id": str(result.inserted_id), 
+        "login": login, 
+        "generatedPassword": password, 
+        "name": name
+    }
+
 
 @app.get("/api/teacher/students/{student_id}")
 async def get_student(student_id: str, user: dict = Depends(require_teacher)):
@@ -358,6 +373,60 @@ async def give_coins(student_id: str, request: Request, user: dict = Depends(req
     await db.users.update_one({"_id": ObjectId(student_id)}, {"$set": {"totalCoins": new_balance}})
     
     return {"message": "Coin berildi" if amount > 0 else "Coin olindi", "newBalance": new_balance}
+
+
+# ============================================
+# PAROL BOSHQARUVI
+# ============================================
+
+@app.get("/api/teacher/students/{student_id}/password")
+async def get_student_password(student_id: str, user: dict = Depends(require_teacher)):
+    """O'quvchi parolini ko'rish"""
+    try:
+        student = await db.users.find_one({"_id": to_object_id(student_id)})
+        
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        return {
+            "name": student["name"],
+            "login": student["login"],
+            "password": student.get("plainPassword", "Parol topilmadi - yangilang")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/teacher/students/{student_id}/reset-password")
+async def reset_student_password(student_id: str, user: dict = Depends(require_teacher)):
+    """O'quvchi parolini yangilash"""
+    try:
+        student = await db.users.find_one({"_id": to_object_id(student_id)})
+        
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        # Yangi parol yaratish
+        new_password = generate_password(8)
+        
+        # Parolni hash qilib va ochiq saqlab yangilash
+        await db.users.update_one(
+            {"_id": to_object_id(student_id)},
+            {"$set": {
+                "passwordHash": hash_password(new_password),
+                "plainPassword": new_password  # <-- YANGI PAROLNI HAM SAQLAYMIZ
+            }}
+        )
+        
+        return {
+            "message": "Parol yangilandi",
+            "name": student["name"],
+            "login": student["login"],
+            "newPassword": new_password
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================
 # DAVOMAT
