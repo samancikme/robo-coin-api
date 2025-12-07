@@ -291,10 +291,21 @@ async def get_student(student_id: str, user: dict = Depends(require_teacher)):
         "presentClasses": present
     }
 
+# O'quvchini TO'LIQ o'chirish
 @app.delete("/api/teacher/students/{student_id}")
 async def delete_student(student_id: str, user: dict = Depends(require_teacher)):
-    await db.users.update_one({"_id": ObjectId(student_id)}, {"$set": {"isActive": False}})
-    return {"message": "O'quvchi o'chirildi"}
+    student_oid = to_object_id(student_id)
+    
+    # O'quvchini o'chirish
+    await db.users.delete_one({"_id": student_oid})
+    
+    # O'quvchiga tegishli barcha ma'lumotlarni ham o'chirish
+    await db.coinTransactions.delete_many({"studentId": student_oid})
+    await db.attendance.delete_many({"studentId": student_oid})
+    await db.submissions.delete_many({"studentId": student_oid})
+    await db.messages.delete_many({"$or": [{"fromUserId": student_oid}, {"toUserId": student_oid}]})
+    
+    return {"message": "O'quvchi va uning barcha ma'lumotlari o'chirildi"}
 
 # ============================================
 # COIN OPERATSIYALARI
@@ -771,6 +782,31 @@ async def seed_data():
 # ============================================
 # SERVER
 # ============================================
+
+# ============================================
+# PAROLNI YANGILASH (RESET PASSWORD)
+# ============================================
+
+@app.post("/api/teacher/students/{student_id}/reset-password")
+async def reset_student_password(student_id: str, user: dict = Depends(require_teacher)):
+    student = await db.users.find_one({"_id": to_object_id(student_id)})
+    if not student:
+        raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+    
+    # Yangi parol yaratish
+    new_password = generate_password(8)
+    
+    # Parolni hash qilib saqlash
+    await db.users.update_one(
+        {"_id": to_object_id(student_id)},
+        {"$set": {"passwordHash": hash_password(new_password)}}
+    )
+    
+    return {
+        "message": "Parol yangilandi",
+        "login": student["login"],
+        "newPassword": new_password
+    }
 
 # ============================================
 # ROOT ENDPOINT
