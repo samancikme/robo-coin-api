@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from datetime import datetime, timedelta
 from bson import ObjectId
+from bson.errors import InvalidId  # <-- BU MUHIM!
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -50,6 +51,8 @@ security = HTTPBearer()
 # YORDAMCHI FUNKSIYALAR
 # ============================================
 
+
+
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -79,6 +82,14 @@ def str_id(doc: dict) -> dict:
         doc["id"] = str(doc["_id"])
         del doc["_id"]
     return doc
+
+# BU FUNKSIYANI QO'SHING! 👇
+def to_object_id(id_str: str):
+    """String ID ni MongoDB ObjectId ga o'zgartirish"""
+    try:
+        return ObjectId(id_str)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Noto'g'ri ID formati")
 
 # ============================================
 # AUTH MIDDLEWARE
