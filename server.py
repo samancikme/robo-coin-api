@@ -772,6 +772,22 @@ async def seed_data():
 # SERVER
 # ============================================
 
+# ============================================
+# ROOT ENDPOINT
+# ============================================
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Robo Coin API ishlayapti!",
+        "version": "1.0.0",
+        "docs_url": "/docs"
+    }
+
+@app.head("/")
+async def root_head():
+    return {}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
