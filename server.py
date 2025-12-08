@@ -20,35 +20,64 @@ import io
 import os
 from dotenv import load_dotenv
 
+# YANGI IMPORT'LAR
+from config import settings
+from models import (
+    LoginRequest, StudentCreate, CoinTransaction, GroupCreate, GroupUpdate,
+    AssignmentCreate, SubmissionReview, RewardCreate, ShopSettingsUpdate,
+    ProfileUpdate, AvatarUpload, MessageSend, AttendanceSave
+)
+from security import (
+    generate_strong_password, generate_passphrase, generate_login,
+    optimize_avatar_image, validate_image_content
+)
+from rate_limiter import limiter, rate_limit_exceeded_handler, RateLimits
+
+
 load_dotenv()
 
 # ============================================
 # APP VA CONFIG
 # ============================================
 
-app = FastAPI(title="Robo Coin API", version="1.0.0")
-
-# CORS - MUHIM!
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"]
+app = FastAPI(
+    title="Robo Coin API",
+    version="2.0.0",
+    description="Robototexnika maktabi coin tizimi",
+    docs_url="/docs" if settings.DEBUG else None,  # Production'da docs yopiq
+    redoc_url="/redoc" if settings.DEBUG else None
 )
 
+# Rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(429, rate_limit_exceeded_handler)
+
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,  # ❌ ["*"] emas!
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    max_age=3600  # Preflight cache 1 soat
+)
+
+
 # Global error handler
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    # Production'da xatolik tafsilotlarini yashirish
+    if settings.ENVIRONMENT == "production":
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Serverda xatolik yuz berdi"}
+        )
+    
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc)},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*"
-        }
+        content={"detail": str(exc)}
     )
 
 # MongoDB
@@ -62,7 +91,6 @@ db = client.robocoin
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
-
 # ============================================
 # YORDAMCHI FUNKSIYALAR
 # ============================================
@@ -71,15 +99,18 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return pwd_context.verify(plain, hashed)
+    except:
+        return False
 
 def create_token(data: dict) -> str:
-    expire = datetime.utcnow() + timedelta(days=7)
-    return jwt.encode({**data, "exp": expire}, JWT_SECRET, algorithm=ALGORITHM)
-
-def generate_password(length: int = 8) -> str:
-    chars = string.ascii_lowercase + string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
+    expire = datetime.utcnow() + timedelta(days=settings.JWT_EXPIRE_DAYS)
+    return jwt.encode(
+        {**data, "exp": expire}, 
+        settings.JWT_SECRET, 
+        algorithm=settings.JWT_ALGORITHM
+    )
 
 def calculate_level(coins: int) -> str:
     if coins >= 71: return "Senior Robotsoz"
@@ -103,17 +134,6 @@ def to_object_id(id_str: str):
         return ObjectId(id_str)
     except (InvalidId, TypeError, Exception):
         raise HTTPException(status_code=400, detail="Noto'g'ri ID formati")
-
-async def parse_json(request: Request) -> dict:
-    """JSON body ni xavfsiz parse qilish"""
-    try:
-        body = await request.body()
-        if not body:
-            raise HTTPException(status_code=400, detail="So'rov tanasi bo'sh")
-        return await request.json()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"JSON formati noto'g'ri: {str(e)}")
-
 # ============================================
 # AUTH MIDDLEWARE
 # ============================================
@@ -121,12 +141,22 @@ async def parse_json(request: Request) -> dict:
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not credentials:
         raise HTTPException(status_code=401, detail="Token kerak")
+    
     try:
         token = credentials.credentials
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token, 
+            settings.JWT_SECRET, 
+            algorithms=[settings.JWT_ALGORITHM]
+        )
+        
         user = await db.users.find_one({"_id": ObjectId(payload["id"])})
         if not user:
             raise HTTPException(status_code=401, detail="Foydalanuvchi topilmadi")
+        
+        if not user.get("isActive", True):
+            raise HTTPException(status_code=401, detail="Akkaunt faol emas")
+        
         return {
             "id": str(user["_id"]), 
             "role": user["role"], 
@@ -146,18 +176,19 @@ async def require_student(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Faqat o'quvchilar uchun")
     return user
 
+
 # ============================================
 # ROOT ENDPOINT
 # ============================================
+
 
 @app.get("/")
 async def root():
     return {
         "message": "Robo Coin API ishlayapti!",
-        "version": "1.0.0",
-        "docs": "/docs"
+        "version": "2.0.0",
+        "docs": "/docs" if settings.DEBUG else "Disabled in production"
     }
-
 # ============================================
 # AUTH ROUTES
 # ============================================
@@ -166,45 +197,40 @@ async def root():
 # LOGIN - KICHIK HARFGA O'ZGARTIRISH
 # ============================================
 
+
 @app.post("/api/auth/login")
-async def login(request: Request):
-    try:
-        data = await parse_json(request)
-        
-        login_name = data.get("login")
-        password = data.get("password")
-        
-        if not login_name or not password:
-            raise HTTPException(status_code=400, detail="Login va parol kerak")
-        
-        # LOGIN KICHIK HARFGA - MUHIM!
-        login_lower = login_name.lower().strip()
-        
-        user = await db.users.find_one({"login": login_lower, "isActive": True})
-        if not user:
-            raise HTTPException(status_code=400, detail="Login yoki parol noto'g'ri")
-        
-        if not verify_password(password, user["passwordHash"]):
-            raise HTTPException(status_code=400, detail="Login yoki parol noto'g'ri")
-        
-        token = create_token({"id": str(user["_id"]), "role": user["role"]})
-        return {
-            "token": token,
-            "user": {
-                "id": str(user["_id"]),
-                "name": user["name"],
-                "role": user["role"],
-                "groupId": str(user.get("groupId", "")) if user.get("groupId") else "",
-                "avatarIcon": user.get("avatarIcon", "robot1"),
-                "avatarColor": user.get("avatarColor", "blue"),
-                "avatarImage": user.get("avatarImage"),
-                "totalCoins": user.get("totalCoins", 0)
-            }
+@limiter.limit(RateLimits.LOGIN)  # 5 ta urinish / 1 daqiqa
+async def login(request: Request, data: LoginRequest):
+    """
+    Login endpoint - Rate limited
+    """
+    # Login kichik harfga (model'da qilingan)
+    user = await db.users.find_one({
+        "login": {"$eq": data.login},  # Explicit equality (injection prevention)
+        "isActive": True
+    })
+    
+    if not user:
+        raise HTTPException(status_code=400, detail="Login yoki parol noto'g'ri")
+    
+    if not verify_password(data.password, user["passwordHash"]):
+        raise HTTPException(status_code=400, detail="Login yoki parol noto'g'ri")
+    
+    token = create_token({"id": str(user["_id"]), "role": user["role"]})
+    
+    return {
+        "token": token,
+        "user": {
+            "id": str(user["_id"]),
+            "name": user["name"],
+            "role": user["role"],
+            "groupId": str(user.get("groupId", "")) if user.get("groupId") else "",
+            "avatarIcon": user.get("avatarIcon", "robot1"),
+            "avatarColor": user.get("avatarColor", "blue"),
+            "avatarImage": user.get("avatarImage"),
+            "totalCoins": user.get("totalCoins", 0)
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    }
 
 
 # ============================================
@@ -277,6 +303,7 @@ async def get_weekly_rankings(groupId: Optional[str] = None, user: dict = Depend
 # ============================================
 
 @app.get("/api/teacher/students/export-credentials")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def export_students_credentials(groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         filter_query = {"role": "student", "isActive": True}
@@ -304,26 +331,24 @@ async def export_students_credentials(groupId: Optional[str] = None, user: dict 
 
 
 @app.get("/api/auth/me")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_me(user: dict = Depends(get_current_user)):
-    try:
-        u = await db.users.find_one({"_id": ObjectId(user["id"])})
-        return {
-            "id": str(u["_id"]),
-            "name": u["name"],
-            "role": u["role"],
-            "groupId": str(u.get("groupId", "")) if u.get("groupId") else "",
-            "avatarIcon": u.get("avatarIcon", "robot1"),
-            "totalCoins": u.get("totalCoins", 0),
-            "level": calculate_level(u.get("totalCoins", 0))
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+    u = await db.users.find_one({"_id": ObjectId(user["id"])})
+    return {
+        "id": str(u["_id"]),
+        "name": u["name"],
+        "role": u["role"],
+        "groupId": str(u.get("groupId", "")) if u.get("groupId") else "",
+        "avatarIcon": u.get("avatarIcon", "robot1"),
+        "totalCoins": u.get("totalCoins", 0),
+        "level": calculate_level(u.get("totalCoins", 0))
+    }
 # ============================================
 # USTOZ - DASHBOARD
 # ============================================
 
 @app.get("/api/teacher/dashboard")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def teacher_dashboard(user: dict = Depends(require_teacher)):
     try:
         total_students = await db.users.count_documents({"role": "student", "isActive": True})
@@ -352,6 +377,7 @@ async def teacher_dashboard(user: dict = Depends(require_teacher)):
 # ============================================
 
 @app.get("/api/teacher/groups")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_groups(user: dict = Depends(require_teacher)):
     try:
         groups = await db.groups.find().to_list(100)
@@ -377,55 +403,59 @@ async def get_groups(user: dict = Depends(require_teacher)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/teacher/groups")
-async def create_group(request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        
-        if not data.get("name"):
-            raise HTTPException(status_code=400, detail="Guruh nomi kerak")
-        
-        # Guruhlar soni 6 tadan oshmasligi kerak
-        group_count = await db.groups.count_documents({})
-        if group_count >= 6:
-            raise HTTPException(status_code=400, detail="Maksimum 6 ta guruh bo'lishi mumkin")
-        
-        result = await db.groups.insert_one({
-            "name": data.get("name"),
-            "description": data.get("description", ""),
-            "createdAt": datetime.utcnow()
-        })
-        return {"id": str(result.inserted_id), "name": data.get("name")}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit(RateLimits.CREATE)
+async def create_group(
+    request: Request,
+    group: GroupCreate,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Yangi guruh yaratish
+    """
+    # Max 6 guruh
+    group_count = await db.groups.count_documents({})
+    if group_count >= 6:
+        raise HTTPException(status_code=400, detail="Maksimum 6 ta guruh bo'lishi mumkin")
+    
+    result = await db.groups.insert_one({
+        "name": group.name,
+        "description": group.description or "",
+        "createdAt": datetime.utcnow()
+    })
+    
+    return {"id": str(result.inserted_id), "name": group.name}
+
 
 @app.patch("/api/teacher/groups/{group_id}")
-async def update_group(group_id: str, request: Request, user: dict = Depends(require_teacher)):
-    """Guruh nomini o'zgartirish"""
-    try:
-        data = await parse_json(request)
-        
-        if not data.get("name"):
-            raise HTTPException(status_code=400, detail="Guruh nomi kerak")
-        
-        group = await db.groups.find_one({"_id": to_object_id(group_id)})
-        if not group:
-            raise HTTPException(status_code=404, detail="Guruh topilmadi")
-        
-        await db.groups.update_one(
-            {"_id": to_object_id(group_id)},
-            {"$set": {
-                "name": data.get("name"),
-                "description": data.get("description", group.get("description", ""))
-            }}
-        )
-        
-        return {"message": "Guruh yangilandi", "name": data.get("name")}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit(RateLimits.UPDATE)
+async def update_group(
+    request: Request,
+    group_id: str, 
+    data: GroupUpdate,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Guruhni yangilash
+    """
+    existing = await db.groups.find_one({"_id": to_object_id(group_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Guruh topilmadi")
+    
+    update_data = {}
+    if data.name:
+        update_data["name"] = data.name
+    if data.description is not None:
+        update_data["description"] = data.description
+    
+    if not update_data:
+        raise HTTPException(status_code=400, detail="Yangilanadigan ma'lumot yo'q")
+    
+    await db.groups.update_one(
+        {"_id": to_object_id(group_id)},
+        {"$set": update_data}
+    )
+    
+    return {"message": "Guruh yangilandi"}
 
 @app.delete("/api/teacher/groups/{group_id}")
 async def delete_group(group_id: str, user: dict = Depends(require_teacher)):
@@ -455,6 +485,7 @@ async def delete_group(group_id: str, user: dict = Depends(require_teacher)):
 # ============================================
 
 @app.get("/api/teacher/students")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_students(groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         filter_query = {"role": "student", "isActive": True}
@@ -492,70 +523,67 @@ async def get_students(groupId: Optional[str] = None, user: dict = Depends(requi
 
 
 
+
 @app.post("/api/teacher/students")
-async def create_student(request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        
-        name = data.get("name")
-        groupId = data.get("groupId")
-        
-        if not name:
-            raise HTTPException(status_code=400, detail="Ism kerak")
-        if not groupId:
-            raise HTTPException(status_code=400, detail="Guruh kerak")
-        
-        # Guruhda o'quvchilar sonini tekshirish (maksimum 12)
-        student_count = await db.users.count_documents({
-            "role": "student",
-            "isActive": True,
-            "groupId": to_object_id(groupId)
-        })
-        
-        if student_count >= 12:
-            raise HTTPException(
-                status_code=400, 
-                detail="Bu guruhda maksimum 12 ta o'quvchi bo'lishi mumkin. Boshqa guruhni tanlang."
-            )
-        
-        # Login yaratish
-        login = data.get("login") or name.lower().replace(" ", "_").replace("'", "").replace(".", "").replace(",", "")
-        
-        # Loginni tekshirish
-        existing = await db.users.find_one({"login": login})
-        if existing:
-            raise HTTPException(status_code=400, detail="Bu login allaqachon mavjud. Boshqa ism kiriting.")
-        
-        # Tasodifiy parol yaratish
-        password = generate_password(8)
-        
-        # O'quvchini yaratish
-        result = await db.users.insert_one({
-            "role": "student",
-            "login": login,
-            "passwordHash": hash_password(password),
-            "plainPassword": password,
-            "name": name,
-            "groupId": to_object_id(groupId),
-            "avatarIcon": "robot1",
-            "totalCoins": 0,
-            "isActive": True,
-            "createdAt": datetime.utcnow()
-        })
-        
-        return {
-            "id": str(result.inserted_id), 
-            "login": login, 
-            "generatedPassword": password, 
-            "name": name
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit(RateLimits.CREATE)
+async def create_student(
+    request: Request,
+    student: StudentCreate,  # ✅ Pydantic validation
+    user: dict = Depends(require_teacher)
+):
+    """
+    Yangi o'quvchi yaratish - Validated & Rate Limited
+    """
+    # Guruhda o'quvchilar sonini tekshirish
+    student_count = await db.users.count_documents({
+        "role": "student",
+        "isActive": True,
+        "groupId": to_object_id(student.groupId)
+    })
+    
+    if student_count >= 12:
+        raise HTTPException(
+            status_code=400, 
+            detail="Bu guruhda maksimum 12 ta o'quvchi. Boshqa guruhni tanlang."
+        )
+    
+    # Login generatsiya qilish
+    login = generate_login(student.name)
+    
+    # Login band emasligini tekshirish
+    existing = await db.users.find_one({"login": login})
+    if existing:
+        # Unique qilish
+        login = f"{login}_{secrets.randbelow(1000)}"
+    
+    # Kuchli parol generatsiya
+    password = generate_strong_password(12)
+    
+    # O'quvchini yaratish
+    result = await db.users.insert_one({
+        "role": "student",
+        "login": login,
+        "passwordHash": hash_password(password),
+        "plainPassword": password,  # Ustozga ko'rsatish uchun
+        "name": student.name,
+        "groupId": to_object_id(student.groupId),
+        "avatarIcon": "robot1",
+        "avatarColor": "blue",
+        "totalCoins": 0,
+        "isActive": True,
+        "createdAt": datetime.utcnow()
+    })
+    
+    return {
+        "id": str(result.inserted_id), 
+        "login": login, 
+        "generatedPassword": password, 
+        "name": student.name
+    }
 
 
 @app.get("/api/teacher/students/{student_id}")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_student(student_id: str, user: dict = Depends(require_teacher)):
     try:
         student = await db.users.find_one({"_id": to_object_id(student_id)})
@@ -637,6 +665,7 @@ async def delete_student(student_id: str, user: dict = Depends(require_teacher))
 # ============================================
 
 @app.get("/api/teacher/students/{student_id}/password")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_student_password(student_id: str, user: dict = Depends(require_teacher)):
     try:
         student = await db.users.find_one({"_id": to_object_id(student_id)})
@@ -694,56 +723,49 @@ async def reset_student_password(student_id: str, user: dict = Depends(require_t
 # ============================================
 
 @app.post("/api/teacher/students/{student_id}/coins")
-async def give_coins(student_id: str, request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        
-        amount = data.get("amount")
-        reason = data.get("reason")
-        
-        if amount is None:
-            raise HTTPException(status_code=400, detail="Coin miqdori kerak")
-        if not reason:
-            raise HTTPException(status_code=400, detail="Sabab kerak")
-        
-        student = await db.users.find_one({"_id": to_object_id(student_id)})
-        if not student:
-            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
-        
-        # Float qiymatni qabul qilish
-        coin_amount = float(amount)
-        
-        await db.coinTransactions.insert_one({
-            "studentId": to_object_id(student_id),
-            "teacherId": to_object_id(user["id"]),
-            "amount": coin_amount,  # Float sifatida saqlash
-            "reason": reason,
-            "createdAt": datetime.utcnow()
-        })
-        
-        # Manfiy balansga ruxsat berish
-        current_balance = student.get("totalCoins", 0)
-        new_balance = current_balance + coin_amount  # Manfiy bo'lishi mumkin
-        
-        await db.users.update_one(
-            {"_id": to_object_id(student_id)}, 
-            {"$set": {"totalCoins": round(new_balance, 2)}}  # 2 xonagacha yaxlitlash
-        )
-        
-        return {
-            "message": "Coin berildi" if coin_amount > 0 else "Coin olindi", 
-            "newBalance": round(new_balance, 2)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit(RateLimits.GIVE_COINS)
+async def give_coins(
+    request: Request,
+    student_id: str, 
+    transaction: CoinTransaction,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Coin berish/olish - Validated & Rate Limited
+    """
+    student = await db.users.find_one({"_id": to_object_id(student_id)})
+    if not student:
+        raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+    
+    # Transaction yaratish
+    await db.coinTransactions.insert_one({
+        "studentId": to_object_id(student_id),
+        "teacherId": to_object_id(user["id"]),
+        "amount": transaction.amount,
+        "reason": transaction.reason,
+        "createdAt": datetime.utcnow()
+    })
+    
+    # Balansni yangilash
+    current_balance = student.get("totalCoins", 0)
+    new_balance = round(current_balance + transaction.amount, 2)
+    
+    await db.users.update_one(
+        {"_id": to_object_id(student_id)}, 
+        {"$set": {"totalCoins": new_balance}}
+    )
+    
+    return {
+        "message": "Coin berildi" if transaction.amount > 0 else "Coin olindi", 
+        "newBalance": new_balance
+    }
 
 # ============================================
 # DAVOMAT
 # ============================================
 
 @app.get("/api/teacher/attendance")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_attendance(groupId: Optional[str] = None, date: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         filter_query = {}
@@ -773,77 +795,73 @@ async def get_attendance(groupId: Optional[str] = None, date: Optional[str] = No
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/teacher/attendance")
-async def save_attendance(request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
+@limiter.limit(RateLimits.UPDATE)
+async def save_attendance(
+    request: Request,
+    data: AttendanceSave,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Davomat saqlash
+    """
+    d = datetime.fromisoformat(data.date.replace("Z", "")).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    
+    # Avvalgi davomatni tekshirish
+    existing_attendance = await db.attendance.find({
+        "groupId": to_object_id(data.groupId), 
+        "date": d
+    }).to_list(100)
+    
+    existing_student_ids = {str(a["studentId"]) for a in existing_attendance}
+    
+    # Eski davomatni o'chirish
+    await db.attendance.delete_many({
+        "groupId": to_object_id(data.groupId), 
+        "date": d
+    })
+    
+    coins_given = 0
+    records = []
+    
+    for entry in data.entries:
+        records.append({
+            "studentId": to_object_id(entry.studentId),
+            "groupId": to_object_id(data.groupId),
+            "date": d,
+            "status": entry.status,
+            "createdAt": datetime.utcnow()
+        })
         
-        groupId = data.get("groupId")
-        date = data.get("date")
-        entries = data.get("entries", [])
-        
-        if not groupId or not date:
-            raise HTTPException(status_code=400, detail="Guruh va sana kerak")
-        
-        d = datetime.fromisoformat(date.replace("Z", "")).replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # Avvalgi davomatni tekshirish (takroriy coin berilmasligi uchun)
-        existing_attendance = await db.attendance.find({
-            "groupId": to_object_id(groupId), 
-            "date": d
-        }).to_list(100)
-        
-        existing_student_ids = {str(a["studentId"]) for a in existing_attendance}
-        
-        # Eski davomatni o'chirish
-        await db.attendance.delete_many({"groupId": to_object_id(groupId), "date": d})
-        
-        coins_given = 0
-        
-        if entries:
-            records = []
-            for e in entries:
-                student_id = e["studentId"]
-                status = e["status"]
-                
-                records.append({
-                    "studentId": to_object_id(student_id),
-                    "groupId": to_object_id(groupId),
-                    "date": d,
-                    "status": status,
-                    "createdAt": datetime.utcnow()
-                })
-                
-                # Agar "present" bo'lsa va avval bu sana uchun coin berilmagan bo'lsa
-                if status == "present" and student_id not in existing_student_ids:
-                    # Avtomatik 1 coin berish
-                    await db.coinTransactions.insert_one({
-                        "studentId": to_object_id(student_id),
-                        "teacherId": to_object_id(user["id"]),
-                        "amount": 1.0,
-                        "reason": "Darsga kelish",
-                        "createdAt": datetime.utcnow()
-                    })
-                    
-                    # Balansni yangilash
-                    await db.users.update_one(
-                        {"_id": to_object_id(student_id)},
-                        {"$inc": {"totalCoins": 1.0}}
-                    )
-                    coins_given += 1
+        # Auto coin for "present"
+        if entry.status == "present" and entry.studentId not in existing_student_ids:
+            await db.coinTransactions.insert_one({
+                "studentId": to_object_id(entry.studentId),
+                "teacherId": to_object_id(user["id"]),
+                "amount": 1.0,
+                "reason": "Darsga kelish",
+                "createdAt": datetime.utcnow()
+            })
             
-            await db.attendance.insert_many(records)
-        
-        return {
-            "message": f"Davomat saqlandi. {coins_given} ta o'quvchiga coin berildi.", 
-            "count": len(entries),
-            "coinsGiven": coins_given
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-        
+            await db.users.update_one(
+                {"_id": to_object_id(entry.studentId)},
+                {"$inc": {"totalCoins": 1.0}}
+            )
+            coins_given += 1
+    
+    if records:
+        await db.attendance.insert_many(records)
+    
+    return {
+        "message": f"Davomat saqlandi. {coins_given} ta o'quvchiga coin berildi.", 
+        "count": len(records),
+        "coinsGiven": coins_given
+    }        
+
+
 @app.get("/api/teacher/attendance/export")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def export_attendance(groupId: str, fromDate: str, toDate: str, user: dict = Depends(require_teacher)):
     try:
         filter_query = {
@@ -874,40 +892,58 @@ async def export_attendance(groupId: str, fromDate: str, toDate: str, user: dict
 
 
 @app.post("/api/student/profile/avatar")
-async def upload_avatar(request: Request, user: dict = Depends(require_student)):
+@limiter.limit(RateLimits.UPLOAD)
+async def upload_avatar(
+    request: Request,
+    data: AvatarUpload,  # ✅ Validated
+    user: dict = Depends(require_student)
+):
+    """
+    Avatar rasm yuklash - Validated, Optimized, Rate Limited
+    """
+    # Rasm validatsiya
+    if not validate_image_content(data.image):
+        raise HTTPException(status_code=400, detail="Noto'g'ri rasm fayli")
+    
+    # Original hajmni tekshirish
     try:
-        data = await parse_json(request)
+        _, encoded = data.image.split(",", 1)
+        original_size = len(base64.b64decode(encoded))
         
-        image_data = data.get("image")
-        if not image_data:
-            raise HTTPException(status_code=400, detail="Rasm kerak")
+        if original_size > 5 * 1024 * 1024:  # 5MB limit
+            raise HTTPException(status_code=400, detail="Rasm 5MB dan katta bo'lmasligi kerak")
+    except:
+        raise HTTPException(status_code=400, detail="Noto'g'ri rasm formati")
+    
+    # Optimizatsiya
+    optimized = optimize_avatar_image(
+        data.image,
+        max_size=(settings.AVATAR_MAX_DIMENSION, settings.AVATAR_MAX_DIMENSION),
+        quality=85
+    )
+    
+    # Optimizatsiyadan keyingi hajm
+    try:
+        _, encoded = optimized.split(",", 1)
+        final_size = len(base64.b64decode(encoded))
         
-        # Base64 hajmini tekshirish (max 500KB)
-        if len(image_data) > 500 * 1024:
-            raise HTTPException(status_code=400, detail="Rasm hajmi 500KB dan oshmasligi kerak")
-        
-        await db.users.update_one(
-            {"_id": to_object_id(user["id"])},
-            {"$set": {"avatarImage": image_data}}
-        )
-        
-        return {"message": "Rasm yuklandi"}
+        if final_size > settings.MAX_AVATAR_SIZE:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Rasm juda katta: {final_size/1024:.1f}KB (max {settings.MAX_AVATAR_SIZE/1024}KB)"
+            )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/student/profile/avatar")
-async def delete_avatar(user: dict = Depends(require_student)):
-    try:
-        await db.users.update_one(
-            {"_id": to_object_id(user["id"])},
-            {"$unset": {"avatarImage": ""}}
-        )
-        return {"message": "Rasm o'chirildi"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except:
+        raise HTTPException(status_code=400, detail="Rasmni qayta ishlashda xatolik")
+    
+    # Saqlash
+    await db.users.update_one(
+        {"_id": to_object_id(user["id"])},
+        {"$set": {"avatarImage": optimized}}
+    )
+    
+    return {"message": "Rasm yuklandi"}
 
 
 # ============================================
@@ -915,6 +951,7 @@ async def delete_avatar(user: dict = Depends(require_student)):
 # ============================================
 
 @app.get("/api/students/public")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_all_students_public(user: dict = Depends(get_current_user)):
     """Barcha o'quvchilarning umumiy ma'lumotlari"""
     try:
@@ -947,6 +984,7 @@ async def get_all_students_public(user: dict = Depends(get_current_user)):
 
 
 @app.get("/api/students/public/{student_id}")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_student_public_profile(student_id: str, user: dict = Depends(get_current_user)):
     """Bitta o'quvchining umumiy profili"""
     try:
@@ -1018,6 +1056,7 @@ async def get_student_public_profile(student_id: str, user: dict = Depends(get_c
 
 
 @app.get("/api/students/compare/{student_id}")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def compare_with_student(student_id: str, user: dict = Depends(require_student)):
     """O'zini boshqa o'quvchi bilan solishtirish"""
     try:
@@ -1072,6 +1111,7 @@ async def compare_with_student(student_id: str, user: dict = Depends(require_stu
 
 # Profil endpoint yangilash (avatarImage qo'shish)
 @app.get("/api/student/profile")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_student_profile(user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
@@ -1097,6 +1137,7 @@ async def get_student_profile(user: dict = Depends(require_student)):
 # ============================================
 
 @app.get("/api/teacher/assignments")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_assignments(user: dict = Depends(require_teacher)):
     try:
         assignments = await db.assignments.find().sort("createdAt", -1).to_list(100)
@@ -1121,29 +1162,28 @@ async def get_assignments(user: dict = Depends(require_teacher)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/teacher/assignments")
-async def create_assignment(request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        
-        if not data.get("title"):
-            raise HTTPException(status_code=400, detail="Topshiriq nomi kerak")
-        
-        group_ids = [to_object_id(g) for g in data.get("groupIds", [])]
-        
-        result = await db.assignments.insert_one({
-            "title": data.get("title"),
-            "description": data.get("description", ""),
-            "groupIds": group_ids,
-            "startDate": datetime.utcnow(),
-            "dueDate": datetime.fromisoformat(data.get("dueDate")) if data.get("dueDate") else None,
-            "isActive": True,
-            "createdAt": datetime.utcnow()
-        })
-        return {"id": str(result.inserted_id), "message": "Topshiriq yaratildi"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit(RateLimits.CREATE)
+async def create_assignment(
+    request: Request,
+    assignment: AssignmentCreate,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Yangi topshiriq yaratish
+    """
+    group_ids = [to_object_id(g) for g in assignment.groupIds]
+    
+    result = await db.assignments.insert_one({
+        "title": assignment.title,
+        "description": assignment.description or "",
+        "groupIds": group_ids,
+        "startDate": datetime.utcnow(),
+        "dueDate": datetime.fromisoformat(assignment.dueDate) if assignment.dueDate else None,
+        "isActive": True,
+        "createdAt": datetime.utcnow()
+    })
+    
+    return {"id": str(result.inserted_id), "message": "Topshiriq yaratildi"}
 
 @app.delete("/api/teacher/assignments/{assignment_id}")
 async def delete_assignment(assignment_id: str, user: dict = Depends(require_teacher)):
@@ -1155,6 +1195,7 @@ async def delete_assignment(assignment_id: str, user: dict = Depends(require_tea
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/teacher/assignments/{assignment_id}/submissions")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_submissions(assignment_id: str, user: dict = Depends(require_teacher)):
     try:
         subs = await db.submissions.find({"assignmentId": to_object_id(assignment_id)}).to_list(100)
@@ -1176,43 +1217,51 @@ async def get_submissions(assignment_id: str, user: dict = Depends(require_teach
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/teacher/submissions/{submission_id}/coins")
-async def review_submission(submission_id: str, request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        coinsGiven = data.get("coinsGiven", 0)
-        
-        sub = await db.submissions.find_one({"_id": to_object_id(submission_id)})
-        if not sub:
-            raise HTTPException(status_code=404, detail="Javob topilmadi")
-        
-        await db.submissions.update_one({"_id": to_object_id(submission_id)}, {"$set": {
+@limiter.limit(RateLimits.GIVE_COINS)
+async def review_submission(
+    request: Request,
+    submission_id: str, 
+    review: SubmissionReview,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Topshiriqni baholash
+    """
+    sub = await db.submissions.find_one({"_id": to_object_id(submission_id)})
+    if not sub:
+        raise HTTPException(status_code=404, detail="Javob topilmadi")
+    
+    await db.submissions.update_one(
+        {"_id": to_object_id(submission_id)}, 
+        {"$set": {
             "status": "reviewed",
             "reviewedAt": datetime.utcnow(),
             "teacherId": to_object_id(user["id"]),
-            "coinsGiven": coinsGiven
-        }})
-        
-        if coinsGiven > 0:
-            await db.coinTransactions.insert_one({
-                "studentId": sub["studentId"],
-                "teacherId": to_object_id(user["id"]),
-                "amount": coinsGiven,
-                "reason": "Topshiriq uchun",
-                "createdAt": datetime.utcnow()
-            })
-            await db.users.update_one({"_id": sub["studentId"]}, {"$inc": {"totalCoins": coinsGiven}})
-        
-        return {"message": "Coin berildi"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            "coinsGiven": review.coinsGiven
+        }}
+    )
+    
+    if review.coinsGiven > 0:
+        await db.coinTransactions.insert_one({
+            "studentId": sub["studentId"],
+            "teacherId": to_object_id(user["id"]),
+            "amount": review.coinsGiven,
+            "reason": "Topshiriq uchun",
+            "createdAt": datetime.utcnow()
+        })
+        await db.users.update_one(
+            {"_id": sub["studentId"]}, 
+            {"$inc": {"totalCoins": review.coinsGiven}}
+        )
+    
+    return {"message": "Coin berildi"}
 
 # ============================================
 # SOVG'ALAR VA DO'KON
 # ============================================
 
 @app.get("/api/teacher/rewards")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_rewards(user: dict = Depends(require_teacher)):
     try:
         rewards = await db.rewards.find().sort("price", 1).to_list(100)
@@ -1221,26 +1270,25 @@ async def get_rewards(user: dict = Depends(require_teacher)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/teacher/rewards")
-async def create_reward(request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        
-        if not data.get("name") or data.get("price") is None:
-            raise HTTPException(status_code=400, detail="Sovg'a nomi va narxi kerak")
-        
-        result = await db.rewards.insert_one({
-            "name": data.get("name"),
-            "description": data.get("description", ""),
-            "price": int(data.get("price")),
-            "category": data.get("category", "kichik"),
-            "icon": data.get("icon", "gift"),
-            "createdAt": datetime.utcnow()
-        })
-        return {"id": str(result.inserted_id), "message": "Sovg'a qo'shildi"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit(RateLimits.CREATE)
+async def create_reward(
+    request: Request,
+    reward: RewardCreate,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Yangi sovg'a yaratish
+    """
+    result = await db.rewards.insert_one({
+        "name": reward.name,
+        "description": reward.description or "",
+        "price": reward.price,
+        "category": reward.category,
+        "icon": reward.icon,
+        "createdAt": datetime.utcnow()
+    })
+    
+    return {"id": str(result.inserted_id), "message": "Sovg'a qo'shildi"}
 
 @app.delete("/api/teacher/rewards/{reward_id}")
 async def delete_reward(reward_id: str, user: dict = Depends(require_teacher)):
@@ -1251,6 +1299,7 @@ async def delete_reward(reward_id: str, user: dict = Depends(require_teacher)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/teacher/shop-settings")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_shop_settings(user: dict = Depends(require_teacher)):
     try:
         settings = await db.shopSettings.find_one()
@@ -1278,6 +1327,7 @@ async def update_shop_settings(request: Request, user: dict = Depends(require_te
 # ============================================
 
 @app.get("/api/teacher/messages")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_teacher_messages(studentId: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         if studentId:
@@ -1303,30 +1353,34 @@ async def get_teacher_messages(studentId: Optional[str] = None, user: dict = Dep
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/teacher/messages")
-async def send_teacher_message(request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        
-        if not data.get("toUserId") or not data.get("text"):
-            raise HTTPException(status_code=400, detail="Qabul qiluvchi va xabar matni kerak")
-        
-        await db.messages.insert_one({
-            "fromUserId": to_object_id(user["id"]),
-            "toUserId": to_object_id(data.get("toUserId")),
-            "text": data.get("text"),
-            "createdAt": datetime.utcnow()
-        })
-        return {"message": "Xabar yuborildi"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+@limiter.limit(RateLimits.CREATE)
+async def send_teacher_message(
+    request: Request,
+    message: MessageSend,  # ✅ Validated
+    user: dict = Depends(require_teacher)
+):
+    """
+    Ustoz xabar yuborish
+    """
+    # Qabul qiluvchi mavjudligini tekshirish
+    recipient = await db.users.find_one({"_id": to_object_id(message.toUserId)})
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+    
+    await db.messages.insert_one({
+        "fromUserId": to_object_id(user["id"]),
+        "toUserId": to_object_id(message.toUserId),
+        "text": message.text,
+        "createdAt": datetime.utcnow()
+    })
+    
+    return {"message": "Xabar yuborildi"}
 # ============================================
 # O'QUVCHI PROFIL SOZLAMALARI
 # ============================================
 
 @app.get("/api/student/profile")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def get_student_profile(user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
@@ -1348,42 +1402,39 @@ async def get_student_profile(user: dict = Depends(require_student)):
 
 
 @app.patch("/api/student/profile")
-async def update_student_profile(request: Request, user: dict = Depends(require_student)):
-    try:
-        data = await parse_json(request)
-        
-        # Faqat ruxsat berilgan maydonlarni yangilash
-        allowed_fields = ["avatarIcon", "avatarColor", "bio"]
-        update_data = {}
-        
-        for field in allowed_fields:
-            if field in data:
-                update_data[field] = data[field]
-        
-        if not update_data:
-            raise HTTPException(status_code=400, detail="Yangilanadigan ma'lumot yo'q")
-        
-        # Bio uchun limit
-        if "bio" in update_data and len(update_data["bio"]) > 100:
-            raise HTTPException(status_code=400, detail="Bio 100 ta belgidan oshmasligi kerak")
-        
-        await db.users.update_one(
-            {"_id": to_object_id(user["id"])},
-            {"$set": update_data}
-        )
-        
-        return {"message": "Profil yangilandi", "updated": update_data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
+@limiter.limit(RateLimits.UPDATE)
+async def update_student_profile(
+    request: Request,
+    profile: ProfileUpdate,  # ✅ Validated
+    user: dict = Depends(require_student)
+):
+    """
+    O'quvchi profil yangilash
+    """
+    update_data = {}
+    
+    if profile.avatarIcon:
+        update_data["avatarIcon"] = profile.avatarIcon
+    if profile.avatarColor:
+        update_data["avatarColor"] = profile.avatarColor
+    if profile.bio is not None:
+        update_data["bio"] = profile.bio
+    
+    if not update_data:
+        raise HTTPException(status_code=400, detail="Yangilanadigan ma'lumot yo'q")
+    
+    await db.users.update_one(
+        {"_id": to_object_id(user["id"])},
+        {"$set": update_data}
+    )
+    
+    return {"message": "Profil yangilandi", "updated": update_data}
 # ============================================
 # O'QUVCHI ROUTES
 # ============================================
 
 @app.get("/api/student/dashboard")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def student_dashboard(user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
@@ -1434,6 +1485,7 @@ async def student_dashboard(user: dict = Depends(require_student)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/student/coins")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def student_coins(user: dict = Depends(require_student)):
     try:
         txs = await db.coinTransactions.find({"studentId": to_object_id(user["id"])}).sort("createdAt", -1).limit(50).to_list(50)
@@ -1454,6 +1506,7 @@ async def student_coins(user: dict = Depends(require_student)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/student/assignments")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def student_assignments(status: Optional[str] = None, user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
@@ -1521,6 +1574,7 @@ async def complete_assignment(assignment_id: str, user: dict = Depends(require_s
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/student/shop")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def student_shop(user: dict = Depends(require_student)):
     try:
         settings = await db.shopSettings.find_one() or {"isOpen": False}
@@ -1570,6 +1624,7 @@ async def redeem_reward(reward_id: str, user: dict = Depends(require_student)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/student/messages")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def student_messages(user: dict = Depends(require_student)):
     try:
         msgs = await db.messages.find({
@@ -1593,34 +1648,37 @@ async def student_messages(user: dict = Depends(require_student)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/student/messages")
-async def send_student_message(request: Request, user: dict = Depends(require_student)):
-    try:
-        data = await parse_json(request)
-        
-        if not data.get("toUserId") or not data.get("text"):
-            raise HTTPException(status_code=400, detail="Qabul qiluvchi va xabar matni kerak")
-        
-        teacher = await db.users.find_one({"_id": to_object_id(data.get("toUserId")), "role": "teacher"})
-        if not teacher:
-            raise HTTPException(status_code=400, detail="Faqat ustozga xabar yuborish mumkin")
-        
-        await db.messages.insert_one({
-            "fromUserId": to_object_id(user["id"]),
-            "toUserId": to_object_id(data.get("toUserId")),
-            "text": data.get("text"),
-            "createdAt": datetime.utcnow()
-        })
-        return {"message": "Xabar yuborildi"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@limiter.limit(RateLimits.CREATE)
+async def send_student_message(
+    request: Request,
+    message: MessageSend,  # ✅ Validated
+    user: dict = Depends(require_student)
+):
+    """
+    O'quvchi xabar yuborish - faqat ustozlarga
+    """
+    teacher = await db.users.find_one({
+        "_id": to_object_id(message.toUserId), 
+        "role": "teacher"
+    })
+    if not teacher:
+        raise HTTPException(status_code=400, detail="Faqat ustozga xabar yuborish mumkin")
+    
+    await db.messages.insert_one({
+        "fromUserId": to_object_id(user["id"]),
+        "toUserId": to_object_id(message.toUserId),
+        "text": message.text,
+        "createdAt": datetime.utcnow()
+    })
+    
+    return {"message": "Xabar yuborildi"}
 
 # ============================================
 # REYTINGLAR
 # ============================================
 
 @app.get("/api/rankings/global")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def global_rankings(user: dict = Depends(get_current_user)):
     try:
         students = await db.users.find({"role": "student", "isActive": True}).sort("totalCoins", -1).to_list(500)
@@ -1637,6 +1695,7 @@ async def global_rankings(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/rankings/group/{group_id}")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def group_rankings(group_id: str, user: dict = Depends(get_current_user)):
     try:
         students = await db.users.find({
@@ -1661,14 +1720,65 @@ async def group_rankings(group_id: str, user: dict = Depends(get_current_user)):
 # ============================================
 
 @app.on_event("startup")
+async def startup_event():
+    """
+    Server ishga tushganda:
+    1. Konfiguratsiyani tekshirish
+    2. Database indexlarni yaratish
+    """
+    # Config validation
+    settings.validate()
+    
+    # Database indexes
+    await create_indexes()
+    
+    # Seed data (agar kerak bo'lsa)
+    await seed_data()
+    
+    print("🚀 Robo Coin API ishga tushdi!")
+
+async def create_indexes():
+    """Database indexlarni yaratish"""
+    try:
+        # Users
+        await db.users.create_index([("login", 1)], unique=True)
+        await db.users.create_index([("role", 1), ("isActive", 1)])
+        await db.users.create_index([("groupId", 1)])
+        await db.users.create_index([("totalCoins", -1)])
+        
+        # Coin Transactions
+        await db.coinTransactions.create_index([("studentId", 1), ("createdAt", -1)])
+        await db.coinTransactions.create_index([("createdAt", -1)])
+        
+        # Attendance
+        await db.attendance.create_index([("studentId", 1), ("date", -1)])
+        await db.attendance.create_index([("groupId", 1), ("date", -1)])
+        
+        # Assignments
+        await db.assignments.create_index([("groupIds", 1)])
+        await db.assignments.create_index([("isActive", 1)])
+        
+        # Submissions
+        await db.submissions.create_index(
+            [("assignmentId", 1), ("studentId", 1)], 
+            unique=True
+        )
+        
+        print("✅ Database indexes created")
+    except Exception as e:
+        print(f"⚠️ Index creation warning: {e}")
+
+
+
 async def seed_data():
+    """Boshlang'ich ma'lumotlar"""
     try:
         existing = await db.users.find_one({"role": "teacher"})
         if existing:
             print("✅ Ma'lumotlar allaqachon mavjud")
             return
         
-        # Ustozlar
+        # Ustozlar - KUCHLI PAROLLAR
         await db.users.insert_many([
             {
                 "role": "teacher", 
@@ -1688,34 +1798,25 @@ async def seed_data():
             }
         ])
         
-        # 6 ta guruh
+        # Guruhlar
         await db.groups.insert_many([
-            {"name": "Guruh 1", "description": "Birinchi guruh", "createdAt": datetime.utcnow()},
-            {"name": "Guruh 2", "description": "Ikkinchi guruh", "createdAt": datetime.utcnow()},
-            {"name": "Guruh 3", "description": "Uchinchi guruh", "createdAt": datetime.utcnow()},
-            {"name": "Guruh 4", "description": "To'rtinchi guruh", "createdAt": datetime.utcnow()},
-            {"name": "Guruh 5", "description": "Beshinchi guruh", "createdAt": datetime.utcnow()},
-            {"name": "Guruh 6", "description": "Oltinchi guruh", "createdAt": datetime.utcnow()}
+            {"name": f"Guruh {i}", "description": "", "createdAt": datetime.utcnow()}
+            for i in range(1, 7)
         ])
         
+        # Shop settings
         await db.shopSettings.insert_one({"isOpen": False})
         
+        # Default rewards
         await db.rewards.insert_many([
             {"name": "Konfet", "description": "Shirin konfet", "price": 5, "category": "kichik", "icon": "candy", "createdAt": datetime.utcnow()},
             {"name": "Ruchka", "description": "Chiroyli ruchka", "price": 10, "category": "kichik", "icon": "pen", "createdAt": datetime.utcnow()},
             {"name": "Daftar", "description": "Katta daftar", "price": 20, "category": "oqish", "icon": "notebook", "createdAt": datetime.utcnow()},
-            {"name": "Mentor Assistant", "description": "Bir dars mentor yordamchisi", "price": 30, "category": "imtiyoz", "icon": "star", "createdAt": datetime.utcnow()}
         ])
         
-        print("=" * 50)
         print("✅ Boshlang'ich ma'lumotlar yaratildi")
-        print("👨‍🏫 Ustoz 1: login=ustoz1, parol=ustoz123")
-        print("👨‍🏫 Ustoz 2: login=ustoz2, parol=ustoz456")
-        print("📚 6 ta guruh yaratildi (har birida max 12 o'quvchi)")
-        print("=" * 50)
     except Exception as e:
-        print(f"Seed xatosi: {e}")
-
+        print(f"⚠️ Seed error: {e}")
 
 # ============================================
 # SERVER
@@ -1725,4 +1826,8 @@ async def seed_data():
 if __name__ == "__main__":
     import uvicorn
     print("🚀 Server ishga tushmoqda...")
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 4000)))
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=int(os.getenv("PORT", 4000))
+    )
