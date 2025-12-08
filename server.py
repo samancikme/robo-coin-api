@@ -304,7 +304,7 @@ async def get_weekly_rankings(groupId: Optional[str] = None, user: dict = Depend
 
 @app.get("/api/teacher/students/export-credentials")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def export_students_credentials(groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
+async def export_students_credentials(request: Request,groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         filter_query = {"role": "student", "isActive": True}
         if groupId:
@@ -332,7 +332,7 @@ async def export_students_credentials(groupId: Optional[str] = None, user: dict 
 
 @app.get("/api/auth/me")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_me(user: dict = Depends(get_current_user)):
+async def get_me(request: Request,user: dict = Depends(get_current_user)):
     u = await db.users.find_one({"_id": ObjectId(user["id"])})
     return {
         "id": str(u["_id"]),
@@ -349,7 +349,7 @@ async def get_me(user: dict = Depends(get_current_user)):
 
 @app.get("/api/teacher/dashboard")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def teacher_dashboard(user: dict = Depends(require_teacher)):
+async def teacher_dashboard(request: Request,user: dict = Depends(require_teacher)):
     try:
         total_students = await db.users.count_documents({"role": "student", "isActive": True})
         
@@ -378,7 +378,7 @@ async def teacher_dashboard(user: dict = Depends(require_teacher)):
 
 @app.get("/api/teacher/groups")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_groups(user: dict = Depends(require_teacher)):
+async def get_groups(request: Request,user: dict = Depends(require_teacher)):
     try:
         groups = await db.groups.find().to_list(100)
         
@@ -486,7 +486,7 @@ async def delete_group(group_id: str, user: dict = Depends(require_teacher)):
 
 @app.get("/api/teacher/students")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_students(groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
+async def get_students(request: Request,groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         filter_query = {"role": "student", "isActive": True}
         if groupId:
@@ -584,7 +584,7 @@ async def create_student(
 
 @app.get("/api/teacher/students/{student_id}")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_student(student_id: str, user: dict = Depends(require_teacher)):
+async def get_student(request: Request,student_id: str, user: dict = Depends(require_teacher)):
     try:
         student = await db.users.find_one({"_id": to_object_id(student_id)})
         if not student:
@@ -666,7 +666,7 @@ async def delete_student(student_id: str, user: dict = Depends(require_teacher))
 
 @app.get("/api/teacher/students/{student_id}/password")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_student_password(student_id: str, user: dict = Depends(require_teacher)):
+async def get_student_password(request: Request,student_id: str, user: dict = Depends(require_teacher)):
     try:
         student = await db.users.find_one({"_id": to_object_id(student_id)})
         
@@ -766,7 +766,7 @@ async def give_coins(
 
 @app.get("/api/teacher/attendance")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_attendance(groupId: Optional[str] = None, date: Optional[str] = None, user: dict = Depends(require_teacher)):
+async def get_attendance(request: Request,groupId: Optional[str] = None, date: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         filter_query = {}
         if groupId:
@@ -862,7 +862,7 @@ async def save_attendance(
 
 @app.get("/api/teacher/attendance/export")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def export_attendance(groupId: str, fromDate: str, toDate: str, user: dict = Depends(require_teacher)):
+async def export_attendance(request: Request,groupId: str, fromDate: str, toDate: str, user: dict = Depends(require_teacher)):
     try:
         filter_query = {
             "groupId": to_object_id(groupId),
@@ -952,7 +952,7 @@ async def upload_avatar(
 
 @app.get("/api/students/public")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_all_students_public(user: dict = Depends(get_current_user)):
+async def get_all_students_public(request: Request,user: dict = Depends(get_current_user)):
     """Barcha o'quvchilarning umumiy ma'lumotlari"""
     try:
         students = await db.users.find(
@@ -985,7 +985,7 @@ async def get_all_students_public(user: dict = Depends(get_current_user)):
 
 @app.get("/api/students/public/{student_id}")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_student_public_profile(student_id: str, user: dict = Depends(get_current_user)):
+async def get_student_public_profile(request: Request,student_id: str, user: dict = Depends(get_current_user)):
     """Bitta o'quvchining umumiy profili"""
     try:
         student = await db.users.find_one({
@@ -1057,7 +1057,7 @@ async def get_student_public_profile(student_id: str, user: dict = Depends(get_c
 
 @app.get("/api/students/compare/{student_id}")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def compare_with_student(student_id: str, user: dict = Depends(require_student)):
+async def compare_with_student(request: Request,student_id: str, user: dict = Depends(require_student)):
     """O'zini boshqa o'quvchi bilan solishtirish"""
     try:
         my_id = user["id"]
@@ -1112,7 +1112,7 @@ async def compare_with_student(student_id: str, user: dict = Depends(require_stu
 # Profil endpoint yangilash (avatarImage qo'shish)
 @app.get("/api/student/profile")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_student_profile(user: dict = Depends(require_student)):
+async def get_student_profile(request: Request,user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
         if not student:
@@ -1138,7 +1138,7 @@ async def get_student_profile(user: dict = Depends(require_student)):
 
 @app.get("/api/teacher/assignments")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_assignments(user: dict = Depends(require_teacher)):
+async def get_assignments(request: Request,user: dict = Depends(require_teacher)):
     try:
         assignments = await db.assignments.find().sort("createdAt", -1).to_list(100)
         
@@ -1196,7 +1196,7 @@ async def delete_assignment(assignment_id: str, user: dict = Depends(require_tea
 
 @app.get("/api/teacher/assignments/{assignment_id}/submissions")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_submissions(assignment_id: str, user: dict = Depends(require_teacher)):
+async def get_submissions(request: Request,assignment_id: str, user: dict = Depends(require_teacher)):
     try:
         subs = await db.submissions.find({"assignmentId": to_object_id(assignment_id)}).to_list(100)
         
@@ -1262,7 +1262,7 @@ async def review_submission(
 
 @app.get("/api/teacher/rewards")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_rewards(user: dict = Depends(require_teacher)):
+async def get_rewards(request: Request,user: dict = Depends(require_teacher)):
     try:
         rewards = await db.rewards.find().sort("price", 1).to_list(100)
         return [str_id(r) for r in rewards]
@@ -1300,7 +1300,7 @@ async def delete_reward(reward_id: str, user: dict = Depends(require_teacher)):
 
 @app.get("/api/teacher/shop-settings")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_shop_settings(user: dict = Depends(require_teacher)):
+async def get_shop_settings(request: Request,user: dict = Depends(require_teacher)):
     try:
         settings = await db.shopSettings.find_one()
         if not settings:
@@ -1328,7 +1328,7 @@ async def update_shop_settings(request: Request, user: dict = Depends(require_te
 
 @app.get("/api/teacher/messages")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_teacher_messages(studentId: Optional[str] = None, user: dict = Depends(require_teacher)):
+async def get_teacher_messages(request: Request,studentId: Optional[str] = None, user: dict = Depends(require_teacher)):
     try:
         if studentId:
             msgs = await db.messages.find({"$or": [
@@ -1381,7 +1381,7 @@ async def send_teacher_message(
 
 @app.get("/api/student/profile")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_student_profile(user: dict = Depends(require_student)):
+async def get_student_profile(request: Request,user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
         if not student:
@@ -1435,7 +1435,7 @@ async def update_student_profile(
 
 @app.get("/api/student/dashboard")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def student_dashboard(user: dict = Depends(require_student)):
+async def student_dashboard(request: Request,user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
         
@@ -1486,7 +1486,7 @@ async def student_dashboard(user: dict = Depends(require_student)):
 
 @app.get("/api/student/coins")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def student_coins(user: dict = Depends(require_student)):
+async def student_coins(request: Request,user: dict = Depends(require_student)):
     try:
         txs = await db.coinTransactions.find({"studentId": to_object_id(user["id"])}).sort("createdAt", -1).limit(50).to_list(50)
         
@@ -1507,7 +1507,7 @@ async def student_coins(user: dict = Depends(require_student)):
 
 @app.get("/api/student/assignments")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def student_assignments(status: Optional[str] = None, user: dict = Depends(require_student)):
+async def student_assignments(request: Request,status: Optional[str] = None, user: dict = Depends(require_student)):
     try:
         student = await db.users.find_one({"_id": to_object_id(user["id"])})
         
@@ -1575,7 +1575,7 @@ async def complete_assignment(assignment_id: str, user: dict = Depends(require_s
 
 @app.get("/api/student/shop")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def student_shop(user: dict = Depends(require_student)):
+async def student_shop(request: Request,user: dict = Depends(require_student)):
     try:
         settings = await db.shopSettings.find_one() or {"isOpen": False}
         rewards = await db.rewards.find().sort("price", 1).to_list(100)
@@ -1625,7 +1625,7 @@ async def redeem_reward(reward_id: str, user: dict = Depends(require_student)):
 
 @app.get("/api/student/messages")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def student_messages(user: dict = Depends(require_student)):
+async def student_messages(request: Request,user: dict = Depends(require_student)):
     try:
         msgs = await db.messages.find({
             "$or": [
@@ -1679,7 +1679,7 @@ async def send_student_message(
 
 @app.get("/api/rankings/global")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def global_rankings(user: dict = Depends(get_current_user)):
+async def global_rankings(request: Request,user: dict = Depends(get_current_user)):
     try:
         students = await db.users.find({"role": "student", "isActive": True}).sort("totalCoins", -1).to_list(500)
         return [
@@ -1696,7 +1696,7 @@ async def global_rankings(user: dict = Depends(get_current_user)):
 
 @app.get("/api/rankings/group/{group_id}")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def group_rankings(group_id: str, user: dict = Depends(get_current_user)):
+async def group_rankings(request: Request,group_id: str, user: dict = Depends(get_current_user)):
     try:
         students = await db.users.find({
             "role": "student", 
