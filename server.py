@@ -603,18 +603,30 @@ async def give_coins(student_id: str, request: Request, user: dict = Depends(req
         if not student:
             raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
         
+        # Float qiymatni qabul qilish
+        coin_amount = float(amount)
+        
         await db.coinTransactions.insert_one({
             "studentId": to_object_id(student_id),
             "teacherId": to_object_id(user["id"]),
-            "amount": int(amount),
+            "amount": coin_amount,  # Float sifatida saqlash
             "reason": reason,
             "createdAt": datetime.utcnow()
         })
         
-        new_balance = max(0, student.get("totalCoins", 0) + int(amount))
-        await db.users.update_one({"_id": to_object_id(student_id)}, {"$set": {"totalCoins": new_balance}})
+        # Manfiy balansga ruxsat berish
+        current_balance = student.get("totalCoins", 0)
+        new_balance = current_balance + coin_amount  # Manfiy bo'lishi mumkin
         
-        return {"message": "Coin berildi" if amount > 0 else "Coin olindi", "newBalance": new_balance}
+        await db.users.update_one(
+            {"_id": to_object_id(student_id)}, 
+            {"$set": {"totalCoins": round(new_balance, 2)}}  # 2 xonagacha yaxlitlash
+        )
+        
+        return {
+            "message": "Coin berildi" if coin_amount > 0 else "Coin olindi", 
+            "newBalance": round(new_balance, 2)
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -667,25 +679,63 @@ async def save_attendance(request: Request, user: dict = Depends(require_teacher
         
         d = datetime.fromisoformat(date.replace("Z", "")).replace(hour=0, minute=0, second=0, microsecond=0)
         
+        # Avvalgi davomatni tekshirish (takroriy coin berilmasligi uchun)
+        existing_attendance = await db.attendance.find({
+            "groupId": to_object_id(groupId), 
+            "date": d
+        }).to_list(100)
+        
+        existing_student_ids = {str(a["studentId"]) for a in existing_attendance}
+        
+        # Eski davomatni o'chirish
         await db.attendance.delete_many({"groupId": to_object_id(groupId), "date": d})
         
+        coins_given = 0
+        
         if entries:
-            records = [{
-                "studentId": to_object_id(e["studentId"]),
-                "groupId": to_object_id(groupId),
-                "date": d,
-                "status": e["status"],
-                "createdAt": datetime.utcnow()
-            } for e in entries]
+            records = []
+            for e in entries:
+                student_id = e["studentId"]
+                status = e["status"]
+                
+                records.append({
+                    "studentId": to_object_id(student_id),
+                    "groupId": to_object_id(groupId),
+                    "date": d,
+                    "status": status,
+                    "createdAt": datetime.utcnow()
+                })
+                
+                # Agar "present" bo'lsa va avval bu sana uchun coin berilmagan bo'lsa
+                if status == "present" and student_id not in existing_student_ids:
+                    # Avtomatik 1 coin berish
+                    await db.coinTransactions.insert_one({
+                        "studentId": to_object_id(student_id),
+                        "teacherId": to_object_id(user["id"]),
+                        "amount": 1.0,
+                        "reason": "Darsga kelish",
+                        "createdAt": datetime.utcnow()
+                    })
+                    
+                    # Balansni yangilash
+                    await db.users.update_one(
+                        {"_id": to_object_id(student_id)},
+                        {"$inc": {"totalCoins": 1.0}}
+                    )
+                    coins_given += 1
             
             await db.attendance.insert_many(records)
         
-        return {"message": "Davomat saqlandi", "count": len(entries)}
+        return {
+            "message": f"Davomat saqlandi. {coins_given} ta o'quvchiga coin berildi.", 
+            "count": len(entries),
+            "coinsGiven": coins_given
+        }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 @app.get("/api/teacher/attendance/export")
 async def export_attendance(groupId: str, fromDate: str, toDate: str, user: dict = Depends(require_teacher)):
     try:
