@@ -162,6 +162,10 @@ async def root():
 # AUTH ROUTES
 # ============================================
 
+# ============================================
+# LOGIN - KICHIK HARFGA O'ZGARTIRISH
+# ============================================
+
 @app.post("/api/auth/login")
 async def login(request: Request):
     try:
@@ -173,7 +177,10 @@ async def login(request: Request):
         if not login_name or not password:
             raise HTTPException(status_code=400, detail="Login va parol kerak")
         
-        user = await db.users.find_one({"login": login_name, "isActive": True})
+        # LOGIN KICHIK HARFGA - MUHIM!
+        login_lower = login_name.lower().strip()
+        
+        user = await db.users.find_one({"login": login_lower, "isActive": True})
         if not user:
             raise HTTPException(status_code=400, detail="Login yoki parol noto'g'ri")
         
@@ -189,6 +196,8 @@ async def login(request: Request):
                 "role": user["role"],
                 "groupId": str(user.get("groupId", "")) if user.get("groupId") else "",
                 "avatarIcon": user.get("avatarIcon", "robot1"),
+                "avatarColor": user.get("avatarColor", "blue"),
+                "avatarImage": user.get("avatarImage"),
                 "totalCoins": user.get("totalCoins", 0)
             }
         }
@@ -196,6 +205,103 @@ async def login(request: Request):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# HAFTALIK REYTING
+# ============================================
+
+@app.get("/api/teacher/rankings/weekly")
+async def get_weekly_rankings(groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
+    try:
+        # Hafta boshlanishi
+        today = datetime.utcnow()
+        week_start = today - timedelta(days=today.weekday())
+        week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Haftalik coinlar
+        pipeline = [
+            {"$match": {
+                "createdAt": {"$gte": week_start},
+                "amount": {"$gt": 0}
+            }},
+            {"$group": {
+                "_id": "$studentId",
+                "weeklyCoins": {"$sum": "$amount"}
+            }},
+            {"$sort": {"weeklyCoins": -1}}
+        ]
+        
+        weekly_coins = await db.coinTransactions.aggregate(pipeline).to_list(500)
+        weekly_map = {str(w["_id"]): w["weeklyCoins"] for w in weekly_coins}
+        
+        # O'quvchilar
+        filter_query = {"role": "student", "isActive": True}
+        if groupId:
+            filter_query["groupId"] = to_object_id(groupId)
+        
+        students = await db.users.find(filter_query).sort("totalCoins", -1).to_list(500)
+        
+        result = []
+        for i, s in enumerate(students):
+            group = None
+            if s.get("groupId"):
+                group = await db.groups.find_one({"_id": s.get("groupId")})
+            
+            result.append({
+                "rank": i + 1,
+                "id": str(s["_id"]),
+                "name": s["name"],
+                "groupName": group["name"] if group else "",
+                "totalCoins": s.get("totalCoins", 0),
+                "weeklyCoins": weekly_map.get(str(s["_id"]), 0),
+                "level": calculate_level(s.get("totalCoins", 0))
+            })
+        
+        # Haftalik bo'yicha saralash
+        result.sort(key=lambda x: x["weeklyCoins"], reverse=True)
+        for i, r in enumerate(result):
+            r["weeklyRank"] = i + 1
+        
+        return {
+            "weekStart": week_start.isoformat(),
+            "weekEnd": (week_start + timedelta(days=6)).isoformat(),
+            "rankings": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# O'QUVCHILAR CREDENTIALS EXPORT
+# ============================================
+
+@app.get("/api/teacher/students/export-credentials")
+async def export_students_credentials(groupId: Optional[str] = None, user: dict = Depends(require_teacher)):
+    try:
+        filter_query = {"role": "student", "isActive": True}
+        if groupId:
+            filter_query["groupId"] = to_object_id(groupId)
+        
+        students = await db.users.find(filter_query).sort("name", 1).to_list(500)
+        
+        result = []
+        for s in students:
+            group = None
+            if s.get("groupId"):
+                group = await db.groups.find_one({"_id": s.get("groupId")})
+            
+            result.append({
+                "name": s["name"],
+                "login": s["login"],
+                "password": s.get("plainPassword", "********"),
+                "groupName": group["name"] if group else ""
+            })
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/auth/me")
 async def get_me(user: dict = Depends(get_current_user)):
