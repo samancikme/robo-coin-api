@@ -14,6 +14,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import random
+import base64
 import string
 import io
 import os
@@ -757,6 +758,231 @@ async def export_attendance(groupId: str, fromDate: str, toDate: str, user: dict
             media_type="text/csv", 
             headers={"Content-Disposition": "attachment; filename=davomat.csv"}
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# RASM YUKLASH (Base64)
+# ============================================
+
+
+@app.post("/api/student/profile/avatar")
+async def upload_avatar(request: Request, user: dict = Depends(require_student)):
+    try:
+        data = await parse_json(request)
+        
+        image_data = data.get("image")
+        if not image_data:
+            raise HTTPException(status_code=400, detail="Rasm kerak")
+        
+        # Base64 hajmini tekshirish (max 500KB)
+        if len(image_data) > 500 * 1024:
+            raise HTTPException(status_code=400, detail="Rasm hajmi 500KB dan oshmasligi kerak")
+        
+        await db.users.update_one(
+            {"_id": to_object_id(user["id"])},
+            {"$set": {"avatarImage": image_data}}
+        )
+        
+        return {"message": "Rasm yuklandi"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/student/profile/avatar")
+async def delete_avatar(user: dict = Depends(require_student)):
+    try:
+        await db.users.update_one(
+            {"_id": to_object_id(user["id"])},
+            {"$unset": {"avatarImage": ""}}
+        )
+        return {"message": "Rasm o'chirildi"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# BOSHQA O'QUVCHILARNING PROFILLARI
+# ============================================
+
+@app.get("/api/students/public")
+async def get_all_students_public(user: dict = Depends(get_current_user)):
+    """Barcha o'quvchilarning umumiy ma'lumotlari"""
+    try:
+        students = await db.users.find(
+            {"role": "student", "isActive": True}
+        ).sort("totalCoins", -1).to_list(500)
+        
+        result = []
+        for i, s in enumerate(students):
+            group = None
+            if s.get("groupId"):
+                group = await db.groups.find_one({"_id": s.get("groupId")})
+            
+            result.append({
+                "id": str(s["_id"]),
+                "name": s["name"],
+                "avatarIcon": s.get("avatarIcon", "robot1"),
+                "avatarColor": s.get("avatarColor", "blue"),
+                "avatarImage": s.get("avatarImage"),
+                "bio": s.get("bio", ""),
+                "totalCoins": s.get("totalCoins", 0),
+                "level": calculate_level(s.get("totalCoins", 0)),
+                "groupName": group["name"] if group else "",
+                "rank": i + 1
+            })
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/students/public/{student_id}")
+async def get_student_public_profile(student_id: str, user: dict = Depends(get_current_user)):
+    """Bitta o'quvchining umumiy profili"""
+    try:
+        student = await db.users.find_one({
+            "_id": to_object_id(student_id),
+            "role": "student",
+            "isActive": True
+        })
+        
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        # Reyting hisoblash
+        all_students = await db.users.find(
+            {"role": "student", "isActive": True}
+        ).sort("totalCoins", -1).to_list(500)
+        
+        global_rank = next((i + 1 for i, s in enumerate(all_students) if str(s["_id"]) == student_id), 0)
+        
+        # Guruh va guruh reytingi
+        group = None
+        group_rank = 0
+        group_total = 0
+        if student.get("groupId"):
+            group = await db.groups.find_one({"_id": student.get("groupId")})
+            group_students = [s for s in all_students if s.get("groupId") == student.get("groupId")]
+            group_rank = next((i + 1 for i, s in enumerate(group_students) if str(s["_id"]) == student_id), 0)
+            group_total = len(group_students)
+        
+        # Davomat
+        total_classes = await db.attendance.count_documents({"studentId": to_object_id(student_id)})
+        present_classes = await db.attendance.count_documents({"studentId": to_object_id(student_id), "status": "present"})
+        attendance_percent = round((present_classes / total_classes * 100) if total_classes > 0 else 0)
+        
+        # So'nggi coinlar
+        recent_coins = await db.coinTransactions.find(
+            {"studentId": to_object_id(student_id)}
+        ).sort("createdAt", -1).limit(5).to_list(5)
+        
+        coin_history = []
+        for c in recent_coins:
+            coin_history.append({
+                "amount": c["amount"],
+                "reason": c["reason"],
+                "createdAt": c["createdAt"].isoformat() if c.get("createdAt") else ""
+            })
+        
+        return {
+            "id": str(student["_id"]),
+            "name": student["name"],
+            "avatarIcon": student.get("avatarIcon", "robot1"),
+            "avatarColor": student.get("avatarColor", "blue"),
+            "avatarImage": student.get("avatarImage"),
+            "bio": student.get("bio", ""),
+            "totalCoins": student.get("totalCoins", 0),
+            "level": calculate_level(student.get("totalCoins", 0)),
+            "groupName": group["name"] if group else "",
+            "globalRank": global_rank,
+            "globalTotal": len(all_students),
+            "groupRank": group_rank,
+            "groupTotal": group_total,
+            "attendancePercent": attendance_percent,
+            "recentCoins": coin_history
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/students/compare/{student_id}")
+async def compare_with_student(student_id: str, user: dict = Depends(require_student)):
+    """O'zini boshqa o'quvchi bilan solishtirish"""
+    try:
+        my_id = user["id"]
+        
+        # O'zim
+        me = await db.users.find_one({"_id": to_object_id(my_id)})
+        # Boshqa o'quvchi
+        other = await db.users.find_one({"_id": to_object_id(student_id)})
+        
+        if not other:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        # Reytinglar
+        all_students = await db.users.find(
+            {"role": "student", "isActive": True}
+        ).sort("totalCoins", -1).to_list(500)
+        
+        my_rank = next((i + 1 for i, s in enumerate(all_students) if str(s["_id"]) == my_id), 0)
+        other_rank = next((i + 1 for i, s in enumerate(all_students) if str(s["_id"]) == student_id), 0)
+        
+        # Davomat
+        my_total = await db.attendance.count_documents({"studentId": to_object_id(my_id)})
+        my_present = await db.attendance.count_documents({"studentId": to_object_id(my_id), "status": "present"})
+        
+        other_total = await db.attendance.count_documents({"studentId": to_object_id(student_id)})
+        other_present = await db.attendance.count_documents({"studentId": to_object_id(student_id), "status": "present"})
+        
+        return {
+            "me": {
+                "name": me["name"],
+                "totalCoins": me.get("totalCoins", 0),
+                "rank": my_rank,
+                "attendancePercent": round((my_present / my_total * 100) if my_total > 0 else 0),
+                "level": calculate_level(me.get("totalCoins", 0))
+            },
+            "other": {
+                "name": other["name"],
+                "totalCoins": other.get("totalCoins", 0),
+                "rank": other_rank,
+                "attendancePercent": round((other_present / other_total * 100) if other_total > 0 else 0),
+                "level": calculate_level(other.get("totalCoins", 0))
+            },
+            "coinDifference": me.get("totalCoins", 0) - other.get("totalCoins", 0),
+            "rankDifference": other_rank - my_rank
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Profil endpoint yangilash (avatarImage qo'shish)
+@app.get("/api/student/profile")
+async def get_student_profile(user: dict = Depends(require_student)):
+    try:
+        student = await db.users.find_one({"_id": to_object_id(user["id"])})
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        return {
+            "id": str(student["_id"]),
+            "name": student["name"],
+            "login": student["login"],
+            "avatarIcon": student.get("avatarIcon", "robot1"),
+            "avatarColor": student.get("avatarColor", "blue"),
+            "avatarImage": student.get("avatarImage"),  # YANGI
+            "bio": student.get("bio", ""),
+            "totalCoins": student.get("totalCoins", 0),
+            "level": calculate_level(student.get("totalCoins", 0))
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
