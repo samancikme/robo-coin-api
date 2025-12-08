@@ -947,6 +947,41 @@ async def upload_avatar(
 
 
 # ============================================
+# RASMNI OCHIRISH (DELETE)
+# ============================================
+
+@app.delete("/api/student/profile/avatar")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
+async def delete_avatar(
+    request: Request,
+    user: dict = Depends(require_student)
+):
+    """
+    O'quvchining profil rasmini o'chirish
+    """
+    try:
+        # O'quvchi ma'lumotlarini olish
+        student = await db.users.find_one({"_id": to_object_id(user["id"])})
+        
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        # Agar rasm mavjud bo'lsa, uni o'chirish
+        if student.get("avatarImage"):
+            await db.users.update_one(
+                {"_id": to_object_id(user["id"])},
+                {"$unset": {"avatarImage": ""}}  # Maydonni o'chirish
+            )
+            return {"message": "Rasm o'chirildi"}
+        else:
+            raise HTTPException(status_code=400, detail="Profil rasm mavjud emas")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================
 # BOSHQA O'QUVCHILARNING PROFILLARI
 # ============================================
 
