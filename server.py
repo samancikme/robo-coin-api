@@ -991,6 +991,63 @@ async def send_teacher_message(request: Request, user: dict = Depends(require_te
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================
+# O'QUVCHI PROFIL SOZLAMALARI
+# ============================================
+
+@app.get("/api/student/profile")
+async def get_student_profile(user: dict = Depends(require_student)):
+    try:
+        student = await db.users.find_one({"_id": to_object_id(user["id"])})
+        if not student:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        return {
+            "id": str(student["_id"]),
+            "name": student["name"],
+            "login": student["login"],
+            "avatarIcon": student.get("avatarIcon", "robot1"),
+            "avatarColor": student.get("avatarColor", "blue"),
+            "bio": student.get("bio", ""),
+            "totalCoins": student.get("totalCoins", 0),
+            "level": calculate_level(student.get("totalCoins", 0))
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/student/profile")
+async def update_student_profile(request: Request, user: dict = Depends(require_student)):
+    try:
+        data = await parse_json(request)
+        
+        # Faqat ruxsat berilgan maydonlarni yangilash
+        allowed_fields = ["avatarIcon", "avatarColor", "bio"]
+        update_data = {}
+        
+        for field in allowed_fields:
+            if field in data:
+                update_data[field] = data[field]
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="Yangilanadigan ma'lumot yo'q")
+        
+        # Bio uchun limit
+        if "bio" in update_data and len(update_data["bio"]) > 100:
+            raise HTTPException(status_code=400, detail="Bio 100 ta belgidan oshmasligi kerak")
+        
+        await db.users.update_one(
+            {"_id": to_object_id(user["id"])},
+            {"$set": update_data}
+        )
+        
+        return {"message": "Profil yangilandi", "updated": update_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
 # O'QUVCHI ROUTES
 # ============================================
 
