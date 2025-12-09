@@ -1345,6 +1345,7 @@ async def get_shop_settings(request: Request,user: dict = Depends(require_teache
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.patch("/api/teacher/shop-settings")
+@limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def update_shop_settings(request: Request, user: dict = Depends(require_teacher)):
     try:
         data = await parse_json(request)
