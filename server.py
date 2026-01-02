@@ -1345,13 +1345,13 @@ async def delete_reward(reward_id: str, user: dict = Depends(require_teacher)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/teacher/shop-settings")
-@limiter.limit(RateLimits.DEFAULT)  # 100/minute
-async def get_shop_settings(request: Request,user: dict = Depends(require_teacher)):
+@limiter.limit(RateLimits.DEFAULT)
+async def get_shop_settings(request: Request, user: dict = Depends(require_teacher)):
     try:
-        settings = await db.shopSettings.find_one()
+        settings = await db.shopSettings.find_one({"_id": "shop"})
         if not settings:
-            settings = {"isOpen": False}
-        return str_id(settings) if settings.get("_id") else settings
+            settings = {"isOpen": False, "openDate": None, "closeDate": None}
+        return str_id(settings)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
