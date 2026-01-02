@@ -12,7 +12,7 @@ from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials ,HTTPException
 import random
 import base64
 import string
@@ -134,6 +134,17 @@ def to_object_id(id_str: str):
         return ObjectId(id_str)
     except (InvalidId, TypeError, Exception):
         raise HTTPException(status_code=400, detail="Noto'g'ri ID formati")
+
+
+def parse_date(v):
+    if not v:
+        return None
+    try:
+        v = v.replace("Z", "+00:00")
+        return datetime.fromisoformat(v)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Noto‘g‘ri sana formati")
+
 # ============================================
 # AUTH MIDDLEWARE
 # ============================================
@@ -1347,16 +1358,19 @@ async def get_shop_settings(request: Request,user: dict = Depends(require_teache
 @app.patch("/api/teacher/shop-settings")
 @limiter.limit(RateLimits.DEFAULT)  # 100/minute
 async def update_shop_settings(request: Request, user: dict = Depends(require_teacher)):
-    try:
-        data = await parse_json(request)
-        await db.shopSettings.update_one({}, {"$set": {
-            "isOpen": data.get("isOpen", False),
-            "openDate": datetime.fromisoformat(data.get("openDate")) if data.get("openDate") else None,
-            "closeDate": datetime.fromisoformat(data.get("closeDate")) if data.get("closeDate") else None
-        }}, upsert=True)
-        return {"message": "Do'kon sozlamalari yangilandi"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    data = await request.json()
+    print("REQ DATA:", data)
+
+    doc = {
+        "isOpen": data.get("isOpen", False),
+        "openDate": parse_date(data.get("openDate")),
+        "closeDate": parse_date(data.get("closeDate")),
+    }
+
+    await db.shopSettings.update_one({"_id": "shop"}, {"$set": doc}, upsert=True)
+
+    return {"message": "Do'kon sozlamalari yangilandi"}
+
 
 # ============================================
 # XABARLAR (USTOZ)
