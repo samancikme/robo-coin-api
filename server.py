@@ -12,7 +12,7 @@ from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials ,HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials 
 import random
 import base64
 import string
